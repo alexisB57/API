@@ -1,93 +1,90 @@
-from flask import Flask, render_template, jsonify, request
-from flask_socketio import SocketIO, emit
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
-from datetime import datetime, timedelta
-import uuid
-import shelve
+# Fichier: api.py
+from flask import Flask, request, jsonify
+import json
+from flask_cors import CORS
+import hashlib
 
 app = Flask(__name__)
-app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'
-app.config['SECRET_KEY'] = 'your_socketio_secret_key'
-jwt = JWTManager(app)
-socketio = SocketIO(app, cors_allowed_origins="*", path="/chat")
+CORS(app)
 
+# Dictionnaire pour stocker les utilisateurs avec leur IP et mot de passe hashé
+users = {}
 
-# Charger les utilisateurs enregistrés depuis la base de données
-with shelve.open('users.db') as db:
-    users = db.get('users', {})
+# Liste pour stocker les messages
+messages = []
 
-# Déclaration de la variable messages
-messages = {}
+def save_data():
+    with open("users.json", 'w') as f:
+        json.dump(users, f)
 
-# Informations de l'API
-api_info = {
-    "CléAdmin": "SWAYZE",
-    "API_Status": "Online (Beta Testing)",
-    "Service d'Obtention Des Clé": "Online (Beta Testing)",
-    "Serveur Méthode": "Local (Beta Testing)",
-    "Serveur Hébergé Publiquement": "No (Beta Testing)",
-    "Test de tous les services de l'API": "Simulation réussie"
-}
+    with open("messages.json", 'w') as f:
+        json.dump(messages, f)
 
-# Route pour s'inscrire
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+def load_data():
+    try:
+        with open("users.json", 'r') as f:
+            loaded_users = json.load(f)
+            users.update(loaded_users)
+    except FileNotFoundError:
+        pass
 
-    if username in users:
-        return jsonify({'message': 'Username already exists'}), 400
+    try:
+        with open("messages.json", 'r') as f:
+            loaded_messages = json.load(f)
+            messages.extend(loaded_messages)
+    except FileNotFoundError:
+        pass
 
-    users[username] = {'password': password, 'messages': []}
+load_data()
 
-    # Enregistrement des utilisateurs dans la base de données
-    with shelve.open('users.db') as db:
-        db['users'] = users
-
-    return jsonify({'message': 'User registered successfully'}), 201
-
-# Route pour se connecter
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+    username = data['username']
+    password = data['password']
 
-    if username not in users or users[username]['password'] != password:
-        return jsonify({'message': 'Invalid credentials'}), 401
+    ip = request.remote_addr  # Récupérer l'IP du client
 
-    # Création du jeton d'accès avec une durée de validité de 15 minutes
-    access_token = create_access_token(identity=username, expires_delta=timedelta(minutes=15))
+    if ip in users and users[ip]['password'] == hashlib.sha256(password.encode()).hexdigest():
+        return jsonify({'message': 'Login successful'})
+    else:
+        return jsonify({'error': 'Invalid username or password'})
 
-    return jsonify({'access_token': access_token}), 200
+@app.route('/create_account', methods=['POST'])
+def create_account():
+    data = request.get_json()
+    username = data['username']
+    password = data['password']
 
-@socketio.on('connect')
-def handle_connect():
-    emit('chat message', {'username': 'System', 'message': 'User connected'})
+    ip = request.remote_addr
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    emit('chat message', {'username': 'System', 'message': 'User disconnected'})
+    if ip not in users:
+        users[ip] = {'username': username, 'password': hashlib.sha256(password.encode()).hexdigest()}
+        save_data()
+        return jsonify({'message': 'Account created successfully'})
+    else:
+        return jsonify({'error': 'Account already exists'})
 
-@socketio.on('chat message')
-def handle_message(data):
-    current_user = get_jwt_identity()
-    recipient = data.get('username')
-    message = data.get('message')
+@app.route('/send_message', methods=['POST'])
+def send_message():
+    data = request.get_json()
+    ip = request.remote_addr
+    username = users.get(ip, {}).get('username', "Unknown User")  # Utiliser l'IP pour récupérer le nom d'utilisateur
 
-    if recipient:  # Si le destinataire est spécifié
-        if recipient not in users:
-            emit('chat message', {'username': 'System', 'message': 'Recipient not found'})
-            return
+    message = {'username': username, 'message': data['message']}
+    messages.append(message)
+    save_data()
 
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        msg_id = str(uuid.uuid4())
-        users[recipient]['messages'].append({'id': msg_id, 'from': current_user, 'message': message, 'timestamp': timestamp})
-        messages[msg_id] = {'from': current_user, 'to': recipient, 'message': message, 'timestamp': timestamp}
-        emit('chat message', {'username': current_user, 'message': message}, room=recipient)
-    else:  # Si le destinataire n'est pas spécifié, diffuser à tous les utilisateurs connectés
-        emit('chat message', {'username': current_user, 'message': message}, broadcast=True)
+    return jsonify({'message': 'Message sent successfully'})
+
+@app.route('/get_messages', methods=['POST'])
+def get_messages():
+    ip = request.remote_addr
+    username = users.get(ip, {}).get('username', "Unknown User")
+
+    user_messages = [msg for msg in messages if msg['username'] == username]
+
+    return jsonify({'messages': user_messages})
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    app.run(debug=True)
